@@ -176,17 +176,16 @@ export default function Home() {
   const audioRef = useRef<HTMLAudioElement>(null);
 
   const title = file ? cleanTitle(file.name) : 'Кеңес';
-  const displayNotes = notes.length ? notes : getDemo(tuning);
+  const displayNotes = useMemo(
+    () => notes.length ? applyTuning(notes, tuning) : getDemo(tuning),
+    [notes, tuning],
+  );
   const effectiveDuration = duration || Math.max(...displayNotes.map((note) => note.startTimeSeconds + note.durationSeconds), 13.86);
   const bpm = useMemo(() => estimateTempo(displayNotes), [displayNotes]);
   const bars = useMemo(
     () => Array.from({ length: 72 }, (_, i) => 18 + ((i * 29 + (i % 7) * 13) % 66)),
     [],
   );
-
-  useEffect(() => {
-    setNotes((current) => current.length ? applyTuning(current, tuning) : current);
-  }, [tuning]);
 
   useEffect(() => () => {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
@@ -386,7 +385,10 @@ export default function Home() {
       duration: note.durationSeconds,
       velocity: Math.max(.1, Math.min(1, note.amplitude)),
     }));
-    downloadBlob(midi.toArray(), `${title}.mid`, 'audio/midi');
+    const midiBytes = midi.toArray();
+    const midiBuffer = new ArrayBuffer(midiBytes.byteLength);
+    new Uint8Array(midiBuffer).set(midiBytes);
+    downloadBlob(midiBuffer, `${title}.mid`, 'audio/midi');
   };
 
   const exportMusicXml = () => {
