@@ -8,20 +8,19 @@ import {
   useRef,
   useState,
 } from 'react';
+import {
+  AccuracyProfile,
+  DombraNote,
+  getPitchRange,
+  RawNote,
+  refineDombraNotes,
+  retabDombraNotes,
+} from '@/lib/dombra-transcription';
 
 type Status = 'idle' | 'ready' | 'processing' | 'done' | 'error';
 type ViewMode = 'tab' | 'score' | 'notes';
-
-type TranscribedNote = {
-  pitchMidi: number;
-  startTimeSeconds: number;
-  durationSeconds: number;
-  amplitude: number;
-  pitchBends?: number[];
-  name: string;
-  string: 'I' | 'II' | '—';
-  fret: number | null;
-};
+type Language = 'RU' | 'KZ';
+type ErrorKey = 'fileType' | 'fileSize' | 'fileDuration' | 'decode' | 'noNotes' | 'transcription';
 
 const TUNINGS = {
   standard: {
@@ -49,7 +48,152 @@ const TUNINGS = {
 
 type TuningKey = keyof typeof TUNINGS;
 
-const NOTE_NAMES = ['C', 'C♯', 'D', 'D♯', 'E', 'F', 'F♯', 'G', 'G♯', 'A', 'A♯', 'B'];
+const COPY = {
+  RU: {
+    brandHome: 'KüyTranscribe — главная',
+    navigation: 'Основная навигация',
+    studio: 'Студия',
+    howItWorks: 'Как это работает',
+    switchLanguage: 'Қазақ тіліне ауыстыру',
+    eyebrow: 'Цифровая мастерская домбры',
+    heroLine1: 'Услышим күй.',
+    heroLine2: 'Запишем каждую ноту.',
+    heroDescription: 'Загрузите сольную запись домбры — сервис превратит исполнение в ноты, MIDI и понятную табулатуру для двух струн.',
+    localProcessing: 'Обработка проходит прямо в браузере',
+    uploadTitle: 'Добавьте запись',
+    uploadHelp: 'Чистое звучание одной домбры даст лучший результат',
+    audioReady: 'Аудиозапись готова',
+    deleteFile: 'Удалить файл',
+    dragTitle: 'Перетащите аудиофайл сюда',
+    chooseDevice: 'или выберите с устройства',
+    maxDuration: 'до 10 минут',
+    tuning: 'Строй домбры',
+    accuracy: 'Точность',
+    balanced: 'Точная · меньше лишних нот',
+    detail: 'Детальная · больше украшений',
+    listening: 'Анализируем исполнение',
+    preparing: 'Подготавливаем и очищаем аудио…',
+    detecting: 'Определяем высоту и начало нот…',
+    cleaning: 'Убираем шум и ложные гармоники…',
+    buildingTab: 'Собираем удобную табулатуру…',
+    recognize: 'Распознать күй',
+    recognizing: 'Распознаём…',
+    recognizeAgain: 'Распознать заново',
+    privacy: 'Файл остаётся на вашем устройстве и не публикуется',
+    resultReady: 'Расшифровка готова',
+    analyzing: 'Идёт анализ',
+    demoTranscription: 'Демонстрационная расшифровка',
+    openDemo: 'Открыть демо',
+    uploadedRecording: 'Загруженная запись',
+    folkKui: 'Халық күйі',
+    notesCount: 'нот',
+    waveform: 'Форма звуковой волны',
+    transcriptionView: 'Вид расшифровки',
+    tablature: 'Табулатура',
+    score: 'Нотный лист',
+    noteList: 'Список нот',
+    time: 'Время',
+    note: 'Нота',
+    string: 'Струна',
+    fret: 'Лад',
+    shortDuration: 'Длит.',
+    seconds: 'с',
+    pause: 'Пауза',
+    play: 'Воспроизвести',
+    export: 'Экспорт расшифровки',
+    print: 'PDF / печать',
+    uploadStep: 'Загрузите',
+    uploadStepText: 'Сольную запись домбры без голоса и фоновой музыки.',
+    reviewStep: 'Проверьте',
+    reviewStepText: 'Сравните ноты с табулатурой для выбранного строя.',
+    saveStep: 'Сохраните',
+    saveStepText: 'Экспортируйте MIDI, MusicXML или нотный лист в PDF.',
+    openTechnology: 'Открытая технология',
+    standardTuning: 'Стандартный строй',
+    processing: 'Обработка',
+    inBrowser: 'локально в браузере',
+    errors: {
+      fileType: 'Выберите аудиофайл MP3, WAV, M4A, OGG или FLAC.',
+      fileSize: 'Файл слишком большой. Максимальный размер — 120 МБ.',
+      fileDuration: 'Используйте запись длительностью до 10 минут.',
+      decode: 'Не удалось прочитать запись. Попробуйте WAV или MP3.',
+      noNotes: 'Ноты не найдены. Попробуйте более громкую сольную запись домбры.',
+      transcription: 'Распознавание не завершилось. Попробуйте короткий WAV/MP3 без фоновой музыки.',
+    },
+  },
+  KZ: {
+    brandHome: 'KüyTranscribe — басты бет',
+    navigation: 'Негізгі навигация',
+    studio: 'Студия',
+    howItWorks: 'Қалай жұмыс істейді',
+    switchLanguage: 'Переключить на русский язык',
+    eyebrow: 'Домбыраның цифрлық шеберханасы',
+    heroLine1: 'Күйді тыңдаймыз.',
+    heroLine2: 'Әр нотасын жазамыз.',
+    heroDescription: 'Домбыраның жеке жазбасын жүктеңіз — сервис орындауды нотаға, MIDI-ге және екі ішекке арналған түсінікті табулатураға айналдырады.',
+    localProcessing: 'Өңдеу тікелей браузерде орындалады',
+    uploadTitle: 'Жазбаны қосыңыз',
+    uploadHelp: 'Бір домбыраның таза дыбысы ең жақсы нәтиже береді',
+    audioReady: 'Аудиожазба дайын',
+    deleteFile: 'Файлды жою',
+    dragTitle: 'Аудиофайлды осында сүйреп әкеліңіз',
+    chooseDevice: 'немесе құрылғыдан таңдаңыз',
+    maxDuration: '10 минутқа дейін',
+    tuning: 'Домбыра бұрауы',
+    accuracy: 'Дәлдік',
+    balanced: 'Дәл · артық ноталар аз',
+    detail: 'Толық · әшекейлер көбірек',
+    listening: 'Орындауды талдап жатырмыз',
+    preparing: 'Аудионы дайындап, тазалап жатырмыз…',
+    detecting: 'Ноталардың биіктігі мен басталуын анықтап жатырмыз…',
+    cleaning: 'Шу мен жалған гармоникаларды тазалап жатырмыз…',
+    buildingTab: 'Ыңғайлы табулатураны құрастырып жатырмыз…',
+    recognize: 'Күйді тану',
+    recognizing: 'Танып жатырмыз…',
+    recognizeAgain: 'Қайта тану',
+    privacy: 'Файл құрылғыңызда қалады және жарияланбайды',
+    resultReady: 'Транскрипция дайын',
+    analyzing: 'Талдау жүріп жатыр',
+    demoTranscription: 'Демо-транскрипция',
+    openDemo: 'Демоны ашу',
+    uploadedRecording: 'Жүктелген жазба',
+    folkKui: 'Халық күйі',
+    notesCount: 'нота',
+    waveform: 'Дыбыс толқынының пішіні',
+    transcriptionView: 'Транскрипция көрінісі',
+    tablature: 'Табулатура',
+    score: 'Ноталық жазба',
+    noteList: 'Ноталар тізімі',
+    time: 'Уақыт',
+    note: 'Нота',
+    string: 'Ішек',
+    fret: 'Перне',
+    shortDuration: 'Ұзақт.',
+    seconds: 'с',
+    pause: 'Кідірту',
+    play: 'Ойнату',
+    export: 'Транскрипцияны экспорттау',
+    print: 'PDF / басып шығару',
+    uploadStep: 'Жүктеңіз',
+    uploadStepText: 'Дауыссыз және фондық музыкасыз домбыра жазбасын жүктеңіз.',
+    reviewStep: 'Тексеріңіз',
+    reviewStepText: 'Ноталарды таңдалған бұрауға арналған табулатурамен салыстырыңыз.',
+    saveStep: 'Сақтаңыз',
+    saveStepText: 'MIDI, MusicXML немесе ноталық жазбаны PDF түрінде сақтаңыз.',
+    openTechnology: 'Ашық технология',
+    standardTuning: 'Қалыпты бұрау',
+    processing: 'Өңдеу',
+    inBrowser: 'браузерде жергілікті',
+    errors: {
+      fileType: 'MP3, WAV, M4A, OGG немесе FLAC аудиофайлын таңдаңыз.',
+      fileSize: 'Файл тым үлкен. Ең үлкен өлшемі — 120 МБ.',
+      fileDuration: 'Ұзақтығы 10 минутқа дейінгі жазбаны пайдаланыңыз.',
+      decode: 'Жазбаны оқу мүмкін болмады. WAV немесе MP3 файлын қолданып көріңіз.',
+      noNotes: 'Ноталар табылмады. Домбыраның қаттырақ әрі таза жеке жазбасын қолданып көріңіз.',
+      transcription: 'Тану аяқталмады. Фондық музыкасыз қысқа WAV/MP3 файлын қолданып көріңіз.',
+    },
+  },
+} as const;
 
 const DEMO_SOURCE = [
   [62, 0, .42], [64, .46, .38], [66, .88, .76], [67, 1.7, .34],
@@ -60,28 +204,11 @@ const DEMO_SOURCE = [
   [57, 11.4, .44], [59, 11.9, .4], [61, 12.34, .4], [62, 12.78, 1.08],
 ] as const;
 
-function midiToName(midi: number) {
-  return `${NOTE_NAMES[midi % 12]}${Math.floor(midi / 12) - 1}`;
-}
-
 function applyTuning(
-  source: Array<Omit<TranscribedNote, 'name' | 'string' | 'fret'>>,
+  source: RawNote[],
   tuningKey: TuningKey,
-): TranscribedNote[] {
-  const tuning = TUNINGS[tuningKey];
-  return source.map((note) => {
-    const candidates = tuning.strings
-      .map((string) => ({ ...string, fret: note.pitchMidi - string.open }))
-      .filter((candidate) => candidate.fret >= 0 && candidate.fret <= 24)
-      .sort((a, b) => a.fret - b.fret);
-    const best = candidates[0];
-    return {
-      ...note,
-      name: midiToName(note.pitchMidi),
-      string: best?.label ?? '—',
-      fret: best?.fret ?? null,
-    };
-  });
+): DombraNote[] {
+  return retabDombraNotes(source, TUNINGS[tuningKey].strings);
 }
 
 function getDemo(tuningKey: TuningKey) {
@@ -107,7 +234,7 @@ function cleanTitle(filename: string) {
   return filename.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ');
 }
 
-function estimateTempo(notes: TranscribedNote[]) {
+function estimateTempo(notes: DombraNote[]) {
   const intervals = notes
     .slice(1)
     .map((note, index) => note.startTimeSeconds - notes[index].startTimeSeconds)
@@ -132,7 +259,7 @@ function downloadBlob(content: BlobPart, filename: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
-function createMusicXml(notes: TranscribedNote[], title: string, bpm: number) {
+function createMusicXml(notes: DombraNote[], title: string, bpm: number) {
   const divisions = 480;
   const noteXml = notes.map((note) => {
     const pitchClass = note.pitchMidi % 12;
@@ -159,21 +286,22 @@ ${noteXml}
 }
 
 export default function Home() {
-  const [language, setLanguage] = useState<'RU' | 'KZ'>('RU');
+  const [language, setLanguage] = useState<Language>('RU');
   const [status, setStatus] = useState<Status>('idle');
   const [file, setFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState('');
   const [duration, setDuration] = useState(0);
   const [progress, setProgress] = useState(0);
-  const [notes, setNotes] = useState<TranscribedNote[]>([]);
+  const [notes, setNotes] = useState<RawNote[]>([]);
   const [tuning, setTuning] = useState<TuningKey>('standard');
-  const [accuracy, setAccuracy] = useState('balanced');
+  const [accuracy, setAccuracy] = useState<AccuracyProfile>('balanced');
   const [view, setView] = useState<ViewMode>('tab');
-  const [error, setError] = useState('');
+  const [error, setError] = useState<ErrorKey | ''>('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isDemo, setIsDemo] = useState(true);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const t = COPY[language];
 
   const title = file ? cleanTitle(file.name) : 'Кеңес';
   const displayNotes = useMemo(
@@ -191,15 +319,23 @@ export default function Home() {
     if (audioUrl) URL.revokeObjectURL(audioUrl);
   }, [audioUrl]);
 
+  const toggleLanguage = () => {
+    setLanguage((current) => {
+      const next = current === 'RU' ? 'KZ' : 'RU';
+      document.documentElement.lang = next === 'KZ' ? 'kk' : 'ru';
+      return next;
+    });
+  };
+
   const chooseFile = async (selected?: File) => {
     if (!selected) return;
     if (!selected.type.startsWith('audio/') && !/\.(mp3|wav|m4a|ogg|flac)$/i.test(selected.name)) {
-      setError('Выберите аудиофайл MP3, WAV, M4A, OGG или FLAC.');
+      setError('fileType');
       setStatus('error');
       return;
     }
     if (selected.size > 120 * 1024 * 1024) {
-      setError('Файл слишком большой. Максимальный размер — 120 МБ.');
+      setError('fileSize');
       setStatus('error');
       return;
     }
@@ -220,11 +356,11 @@ export default function Home() {
       setDuration(decoded.duration);
       await context.close();
       if (decoded.duration > 600) {
-        setError('Для MVP используйте запись длительностью до 10 минут.');
+        setError('fileDuration');
         setStatus('error');
       }
     } catch {
-      setError('Не удалось прочитать запись. Попробуйте WAV или MP3.');
+      setError('decode');
       setStatus('error');
     }
   };
@@ -264,11 +400,37 @@ export default function Home() {
       const frameCount = Math.ceil(decoded.duration * 22050);
       const offline = new OfflineAudioContext(1, frameCount, 22050);
       const source = offline.createBufferSource();
+      const highPass = offline.createBiquadFilter();
+      const lowPass = offline.createBiquadFilter();
+      const compressor = offline.createDynamicsCompressor();
       source.buffer = decoded;
-      source.connect(offline.destination);
+      highPass.type = 'highpass';
+      highPass.frequency.value = 70;
+      highPass.Q.value = .7;
+      lowPass.type = 'lowpass';
+      lowPass.frequency.value = 4800;
+      lowPass.Q.value = .7;
+      compressor.threshold.value = -34;
+      compressor.knee.value = 18;
+      compressor.ratio.value = 3;
+      compressor.attack.value = .004;
+      compressor.release.value = .2;
+      source.connect(highPass).connect(lowPass).connect(compressor).connect(offline.destination);
       source.start();
       const resampled = await offline.startRendering();
       await decodeContext.close();
+
+      const samples = resampled.getChannelData(0);
+      let peak = 0;
+      for (let index = 0; index < samples.length; index += 1) {
+        peak = Math.max(peak, Math.abs(samples[index]));
+      }
+      if (peak > 0 && peak < .78) {
+        const gain = Math.min(3.5, .86 / peak);
+        for (let index = 0; index < samples.length; index += 1) {
+          samples[index] = Math.max(-1, Math.min(1, samples[index] * gain));
+        }
+      }
       setProgress(.09);
 
       const {
@@ -293,18 +455,33 @@ export default function Home() {
         (value) => setProgress(.1 + value * .82),
       );
 
-      const threshold = accuracy === 'detail' ? .22 : .3;
+      const pitchRange = getPitchRange(TUNINGS[tuning].strings);
+      const onsetThreshold = accuracy === 'detail' ? .3 : .42;
+      const frameThreshold = accuracy === 'detail' ? .24 : .3;
+      const minimumFrames = accuracy === 'detail' ? 5 : 7;
       const raw = noteFramesToTime(
         addPitchBendsToNoteEvents(
           contours,
-          outputToNotesPoly(frames, onsets, threshold, .25, 5),
+          outputToNotesPoly(
+            frames,
+            onsets,
+            onsetThreshold,
+            frameThreshold,
+            minimumFrames,
+            true,
+            pitchRange.maximumHz,
+            pitchRange.minimumHz,
+            true,
+            accuracy === 'detail' ? 11 : 8,
+          ),
         ),
-      )
-        .filter((note) => note.durationSeconds >= .045 && note.pitchMidi >= 45 && note.pitchMidi <= 92)
-        .sort((a, b) => a.startTimeSeconds - b.startTimeSeconds);
+      );
+      setProgress(.95);
 
-      if (!raw.length) throw new Error('NO_NOTES');
-      setNotes(applyTuning(raw, tuning));
+      const refined = refineDombraNotes(raw, TUNINGS[tuning].strings, accuracy);
+
+      if (!refined.length) throw new Error('NO_NOTES');
+      setNotes(refined);
       setProgress(1);
       setView('tab');
       setStatus('done');
@@ -312,8 +489,8 @@ export default function Home() {
       console.error(reason);
       setError(
         reason instanceof Error && reason.message === 'NO_NOTES'
-          ? 'Ноты не найдены. Попробуйте более громкую сольную запись домбры.'
-          : 'Распознавание не завершилось. Попробуйте короткий WAV/MP3 без фоновой музыки.',
+          ? 'noNotes'
+          : 'transcription',
       );
       setStatus('error');
       setProgress(0);
@@ -404,21 +581,19 @@ export default function Home() {
   return (
     <main className="app-shell">
       <header className="topbar">
-        <a className="brand" href="#" aria-label="KüyTranscribe — главная">
+        <a className="brand" href="#" aria-label={t.brandHome}>
           <span className="brand-mark">К</span>
           <span>KüyTranscribe</span>
-          <span className="beta">MVP</span>
         </a>
-        <nav className="nav-links" aria-label="Основная навигация">
-          <a className="active" href="#workspace">Студия</a>
-          <a href="#workflow">Как это работает</a>
-          <a href="https://github.com/spotify/basic-pitch" target="_blank" rel="noreferrer">Технология</a>
+        <nav className="nav-links" aria-label={t.navigation}>
+          <a className="active" href="#workspace">{t.studio}</a>
+          <a href="#workflow">{t.howItWorks}</a>
         </nav>
         <button
           className="language"
           type="button"
-          onClick={() => setLanguage((current) => current === 'RU' ? 'KZ' : 'RU')}
-          aria-label="Переключить язык"
+          onClick={toggleLanguage}
+          aria-label={t.switchLanguage}
         >
           {language} <span>↻</span>
         </button>
@@ -426,13 +601,13 @@ export default function Home() {
 
       <section className="hero" id="workspace">
         <div className="hero-copy">
-          <div className="eyebrow"><span /> Цифровая мастерская домбры</div>
-          <h1>Услышим күй.<br /><em>Запишем каждую ноту.</em></h1>
-          <p>Загрузите сольную запись домбры — сервис превратит исполнение в ноты, MIDI и понятную табулатуру для двух струн.</p>
+          <div className="eyebrow"><span /> {t.eyebrow}</div>
+          <h1>{t.heroLine1}<br /><em>{t.heroLine2}</em></h1>
+          <p>{t.heroDescription}</p>
         </div>
         <div className="hero-aside">
           <span>01</span>
-          <p>Обработка проходит<br />прямо в браузере</p>
+          <p>{t.localProcessing}</p>
         </div>
       </section>
 
@@ -441,8 +616,8 @@ export default function Home() {
           <div className="card-heading">
             <span className="step">01</span>
             <div>
-              <h2>Добавьте запись</h2>
-              <p>Чистое звучание одной домбры даст лучший результат</p>
+              <h2>{t.uploadTitle}</h2>
+              <p>{t.uploadHelp}</p>
             </div>
           </div>
 
@@ -450,11 +625,11 @@ export default function Home() {
             <div className="selected-file">
               <div className="file-vinyl"><span>♪</span></div>
               <div className="file-copy">
-                <small>Аудиозапись готова</small>
+                <small>{t.audioReady}</small>
                 <strong>{file.name}</strong>
                 <span>{(file.size / 1024 / 1024).toFixed(1)} МБ · {formatTime(duration)}</span>
               </div>
-              <button type="button" onClick={removeFile} aria-label="Удалить файл">×</button>
+              <button type="button" onClick={removeFile} aria-label={t.deleteFile}>×</button>
             </div>
           ) : (
             <label
@@ -469,37 +644,43 @@ export default function Home() {
             >
               <input id="audio-file" type="file" accept="audio/*,.mp3,.wav,.m4a,.ogg,.flac" onChange={onFileChange} />
               <span className="upload-icon">↑</span>
-              <strong>Перетащите аудиофайл сюда</strong>
-              <span>или выберите с устройства</span>
-              <small>MP3, WAV, M4A, OGG, FLAC · до 10 минут</small>
+              <strong>{t.dragTitle}</strong>
+              <span>{t.chooseDevice}</span>
+              <small>MP3, WAV, M4A, OGG, FLAC · {t.maxDuration}</small>
             </label>
           )}
 
           <div className="settings-row">
             <label>
-              <span>Строй домбры</span>
+              <span>{t.tuning}</span>
               <select value={tuning} onChange={(event) => setTuning(event.target.value as TuningKey)}>
                 {Object.entries(TUNINGS).map(([key, value]) => <option key={key} value={key}>{value.name}</option>)}
               </select>
             </label>
             <label>
-              <span>Точность</span>
-              <select value={accuracy} onChange={(event) => setAccuracy(event.target.value)}>
-                <option value="balanced">Сбалансированная</option>
-                <option value="detail">Больше деталей</option>
+              <span>{t.accuracy}</span>
+              <select value={accuracy} onChange={(event) => setAccuracy(event.target.value as AccuracyProfile)}>
+                <option value="balanced">{t.balanced}</option>
+                <option value="detail">{t.detail}</option>
               </select>
             </label>
           </div>
 
           {status === 'processing' && (
             <div className="progress-box" role="status">
-              <div><span>Нейросеть слушает исполнение</span><strong>{activeProgress}%</strong></div>
+              <div><span>{t.listening}</span><strong>{activeProgress}%</strong></div>
               <i><span style={{ width: `${activeProgress}%` }} /></i>
-              <small>{activeProgress < 12 ? 'Подготавливаем аудио…' : activeProgress < 92 ? 'Определяем высоту и начало нот…' : 'Собираем табулатуру…'}</small>
+              <small>{activeProgress < 12
+                ? t.preparing
+                : activeProgress < 93
+                  ? t.detecting
+                  : activeProgress < 97
+                    ? t.cleaning
+                    : t.buildingTab}</small>
             </div>
           )}
 
-          {error && <p className="error-message" role="alert">{error}</p>}
+          {error && <p className="error-message" role="alert">{t.errors[error]}</p>}
 
           <button
             className="primary-button"
@@ -507,32 +688,32 @@ export default function Home() {
             disabled={!file || status === 'processing' || status === 'error'}
             onClick={() => void transcribe()}
           >
-            <span>{status === 'processing' ? 'Распознаём…' : status === 'done' && !isDemo ? 'Распознать заново' : 'Распознать күй'}</span>
+            <span>{status === 'processing' ? t.recognizing : status === 'done' && !isDemo ? t.recognizeAgain : t.recognize}</span>
             <span>↗</span>
           </button>
-          <p className="privacy-note">Файл остаётся на вашем устройстве и не публикуется</p>
+          <p className="privacy-note">{t.privacy}</p>
         </article>
 
         <article className="score-card">
           <div className="score-toolbar">
             <div>
               <span className={`live-dot ${status === 'processing' ? 'pulse' : ''}`} />
-              <span>{status === 'done' && !isDemo ? 'Расшифровка готова' : status === 'processing' ? 'Идёт анализ' : 'Демонстрационная расшифровка'}</span>
+              <span>{status === 'done' && !isDemo ? t.resultReady : status === 'processing' ? t.analyzing : t.demoTranscription}</span>
             </div>
-            <button type="button" onClick={openDemo}>Открыть демо <span>↗</span></button>
+            <button type="button" onClick={openDemo}>{t.openDemo} <span>↗</span></button>
           </div>
 
           <div className="track-title">
             <div>
-              <small>{file ? 'Загруженная запись' : 'Халық күйі'}</small>
+              <small>{file ? t.uploadedRecording : t.folkKui}</small>
               <h2>{title}</h2>
             </div>
             <div className="track-meta">
-              <span>♩ {bpm} BPM</span><span>{displayNotes.length} нот</span><span>{formatTime(effectiveDuration)}</span>
+              <span>♩ {bpm} BPM</span><span>{displayNotes.length} {t.notesCount}</span><span>{formatTime(effectiveDuration)}</span>
             </div>
           </div>
 
-          <div className="waveform" aria-label="Форма звуковой волны" onClick={(event) => {
+          <div className="waveform" aria-label={t.waveform} onClick={(event) => {
             if (!audioRef.current || !audioUrl) return;
             const bounds = event.currentTarget.getBoundingClientRect();
             const next = ((event.clientX - bounds.left) / bounds.width) * effectiveDuration;
@@ -545,10 +726,10 @@ export default function Home() {
             <span className="playhead" style={{ left: `${playPercent}%` }} />
           </div>
 
-          <div className="view-tabs" role="tablist" aria-label="Вид расшифровки">
-            <button className={view === 'tab' ? 'active' : ''} onClick={() => setView('tab')} role="tab">Табулатура</button>
-            <button className={view === 'score' ? 'active' : ''} onClick={() => setView('score')} role="tab">Нотный лист</button>
-            <button className={view === 'notes' ? 'active' : ''} onClick={() => setView('notes')} role="tab">Список нот</button>
+          <div className="view-tabs" role="tablist" aria-label={t.transcriptionView}>
+            <button className={view === 'tab' ? 'active' : ''} onClick={() => setView('tab')} role="tab">{t.tablature}</button>
+            <button className={view === 'score' ? 'active' : ''} onClick={() => setView('score')} role="tab">{t.score}</button>
+            <button className={view === 'notes' ? 'active' : ''} onClick={() => setView('notes')} role="tab">{t.noteList}</button>
           </div>
 
           <div className="transcription-view">
@@ -595,16 +776,16 @@ export default function Home() {
             {view === 'notes' && (
               <div className="notes-table-wrap">
                 <table className="notes-table">
-                  <thead><tr><th>№</th><th>Время</th><th>Нота</th><th>Струна</th><th>Лад</th><th>Длит.</th></tr></thead>
+                  <thead><tr><th>№</th><th>{t.time}</th><th>{t.note}</th><th>{t.string}</th><th>{t.fret}</th><th>{t.shortDuration}</th></tr></thead>
                   <tbody>
                     {visibleNotes.map((note, index) => (
                       <tr key={`${note.startTimeSeconds}-${index}`}>
                         <td>{String(index + 1).padStart(2, '0')}</td>
-                        <td>{note.startTimeSeconds.toFixed(2)} с</td>
+                        <td>{note.startTimeSeconds.toFixed(2)} {t.seconds}</td>
                         <td><strong>{note.name}</strong></td>
                         <td>{note.string}</td>
                         <td>{note.fret ?? '—'}</td>
-                        <td>{note.durationSeconds.toFixed(2)} с</td>
+                        <td>{note.durationSeconds.toFixed(2)} {t.seconds}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -614,7 +795,7 @@ export default function Home() {
           </div>
 
           <div className="score-footer">
-            <button className="play-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? 'Пауза' : 'Воспроизвести'}>
+            <button className="play-button" type="button" onClick={togglePlayback} aria-label={isPlaying ? t.pause : t.play}>
               {isPlaying ? 'Ⅱ' : '▶'}
             </button>
             <div className="timeline"><span style={{ width: `${playPercent}%` }} /><i style={{ left: `${playPercent}%` }} /></div>
@@ -632,31 +813,31 @@ export default function Home() {
           )}
 
           <div className="export-bar">
-            <span>Экспорт расшифровки</span>
+            <span>{t.export}</span>
             <div>
               <button type="button" onClick={() => void exportMidi()}>MIDI ↓</button>
               <button type="button" onClick={exportMusicXml}>MusicXML ↓</button>
-              <button type="button" onClick={() => window.print()}>PDF / печать ↓</button>
+              <button type="button" onClick={() => window.print()}>{t.print} ↓</button>
             </div>
           </div>
         </article>
       </section>
 
       <section className="workflow" id="workflow">
-        <div><span>01</span><strong>Загрузите</strong><p>Сольную запись домбры без голоса и фоновой музыки.</p></div>
-        <div><span>02</span><strong>Проверьте</strong><p>Сравните ноты с табулатурой для выбранного строя.</p></div>
-        <div><span>03</span><strong>Сохраните</strong><p>Экспортируйте MIDI, MusicXML или нотный лист в PDF.</p></div>
+        <div><span>01</span><strong>{t.uploadStep}</strong><p>{t.uploadStepText}</p></div>
+        <div><span>02</span><strong>{t.reviewStep}</strong><p>{t.reviewStepText}</p></div>
+        <div><span>03</span><strong>{t.saveStep}</strong><p>{t.saveStepText}</p></div>
       </section>
 
       <section className="trust-strip">
-        <span>Открытая технология</span>
+        <span>{t.openTechnology}</span>
         <a href="https://github.com/spotify/basic-pitch" target="_blank" rel="noreferrer">Spotify Basic Pitch ↗</a>
         <i />
-        <span>Стандартный строй</span>
+        <span>{t.standardTuning}</span>
         <strong>D3 — G3</strong>
         <i />
-        <span>Обработка</span>
-        <strong>локально в браузере</strong>
+        <span>{t.processing}</span>
+        <strong>{t.inBrowser}</strong>
       </section>
     </main>
   );
