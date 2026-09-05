@@ -286,7 +286,7 @@ ${noteXml}
 }
 
 export default function Home() {
-  const [language, setLanguage] = useState<Language>('RU');
+  const [language, setLanguage] = useState<Language>('KZ');
   const [status, setStatus] = useState<Status>('idle');
   const [file, setFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState('');
