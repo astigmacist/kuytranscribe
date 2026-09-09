@@ -1,5 +1,7 @@
 'use client';
 
+import { createMusicXml } from '../lib/musicxml';
+
 import {
   ChangeEvent,
   DragEvent,
@@ -17,7 +19,7 @@ import {
   retabDombraNotes,
 } from '@/lib/dombra-transcription';
 
-type Status = 'idle' | 'ready' | 'processing' | 'done' | 'error';
+type Status = 'idle' | 'validating' | 'ready' | 'processing' | 'done' | 'error';
 type ViewMode = 'tab' | 'score' | 'notes';
 type Language = 'RU' | 'KZ';
 type ErrorKey = 'fileType' | 'fileSize' | 'fileDuration' | 'decode' | 'noNotes' | 'transcription';
@@ -90,7 +92,7 @@ const COPY = {
     waveform: 'Форма звуковой волны',
     transcriptionView: 'Вид расшифровки',
     tablature: 'Табулатура',
-    score: 'Нотный лист',
+    score: 'Контур высоты звука',
     noteList: 'Список нот',
     time: 'Время',
     note: 'Нота',
@@ -162,7 +164,7 @@ const COPY = {
     waveform: 'Дыбыс толқынының пішіні',
     transcriptionView: 'Транскрипция көрінісі',
     tablature: 'Табулатура',
-    score: 'Ноталық жазба',
+    score: 'Дыбыс биіктігінің сызбасы',
     noteList: 'Ноталар тізімі',
     time: 'Уақыт',
     note: 'Нота',
@@ -259,32 +261,6 @@ function downloadBlob(content: BlobPart, filename: string, type: string) {
   setTimeout(() => URL.revokeObjectURL(url), 500);
 }
 
-function createMusicXml(notes: DombraNote[], title: string, bpm: number) {
-  const divisions = 480;
-  const noteXml = notes.map((note) => {
-    const pitchClass = note.pitchMidi % 12;
-    const steps = ['C', 'C', 'D', 'D', 'E', 'F', 'F', 'G', 'G', 'A', 'A', 'B'];
-    const alters = [0, 1, 0, 1, 0, 0, 1, 0, 1, 0, 1, 0];
-    const duration = Math.max(60, Math.round(note.durationSeconds * bpm / 60 * divisions));
-    return `      <note>
-        <pitch><step>${steps[pitchClass]}</step>${alters[pitchClass] ? '<alter>1</alter>' : ''}<octave>${Math.floor(note.pitchMidi / 12) - 1}</octave></pitch>
-        <duration>${duration}</duration><voice>1</voice><type>quarter</type>
-        <lyric><text>${note.string}/${note.fret ?? '—'}</text></lyric>
-      </note>`;
-  }).join('\n');
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE score-partwise PUBLIC "-//Recordare//DTD MusicXML 4.0 Partwise//EN" "http://www.musicxml.org/dtds/partwise.dtd">
-<score-partwise version="4.0">
-  <work><work-title>${title}</work-title></work>
-  <part-list><score-part id="P1"><part-name>Домбыра</part-name></score-part></part-list>
-  <part id="P1"><measure number="1">
-    <attributes><divisions>${divisions}</divisions><key><fifths>0</fifths></key><time><beats>4</beats><beat-type>4</beat-type></time><clef><sign>G</sign><line>2</line></clef></attributes>
-    <direction><sound tempo="${bpm}"/></direction>
-${noteXml}
-  </measure></part>
-</score-partwise>`;
-}
-
 export default function Home() {
   const [language, setLanguage] = useState<Language>('KZ');
   const [status, setStatus] = useState<Status>('idle');
@@ -301,12 +277,28 @@ export default function Home() {
   const [currentTime, setCurrentTime] = useState(0);
   const [isDemo, setIsDemo] = useState(true);
   const audioRef = useRef<HTMLAudioElement>(null);
+  const operation = useRef(0);
+  const busyRef = useRef(false);
+  const [engineBusy, setEngineBusy] = useState(false);
+  const engineRef = useRef<InstanceType<typeof import('@spotify/basic-pitch')['BasicPitch']> | null>(null);
+  const synthRef = useRef<{ context: AudioContext; frame: number } | null>(null);
+  const stopPlayback = () => {
+    audioRef.current?.pause();
+    const synth = synthRef.current;
+    if (synth) { cancelAnimationFrame(synth.frame); void synth.context.close(); synthRef.current = null; }
+    setIsPlaying(false);
+  };
+  useEffect(() => () => {
+    operation.current += 1;
+    const synth = synthRef.current;
+    if (synth) { cancelAnimationFrame(synth.frame); void synth.context.close(); }
+  }, []);
   const t = COPY[language];
 
   const title = file ? cleanTitle(file.name) : 'Кеңес';
   const displayNotes = useMemo(
-    () => notes.length ? applyTuning(notes, tuning) : getDemo(tuning),
-    [notes, tuning],
+    () => notes.length ? applyTuning(notes, tuning) : isDemo ? getDemo(tuning) : [],
+    [notes, tuning, isDemo],
   );
   const effectiveDuration = duration || Math.max(...displayNotes.map((note) => note.startTimeSeconds + note.durationSeconds), 13.86);
   const bpm = useMemo(() => estimateTempo(displayNotes), [displayNotes]);
@@ -329,6 +321,8 @@ export default function Home() {
 
   const chooseFile = async (selected?: File) => {
     if (!selected) return;
+    const token = ++operation.current;
+    stopPlayback();
     if (!selected.type.startsWith('audio/') && !/\.(mp3|wav|m4a|ogg|flac)$/i.test(selected.name)) {
       setError('fileType');
       setStatus('error');
@@ -348,20 +342,21 @@ export default function Home() {
     setCurrentTime(0);
     setIsDemo(false);
     setError('');
-    setStatus('ready');
+    setStatus('validating');
+    setDuration(0);
 
+    let context: AudioContext | undefined;
     try {
-      const context = new AudioContext();
+      context = new AudioContext();
       const decoded = await context.decodeAudioData(await selected.arrayBuffer());
+      if (token !== operation.current) return;
       setDuration(decoded.duration);
-      await context.close();
-      if (decoded.duration > 600) {
-        setError('fileDuration');
-        setStatus('error');
-      }
+      if (decoded.duration > 600) { setError('fileDuration'); setStatus('error'); }
+      else setStatus('ready');
     } catch {
-      setError('decode');
-      setStatus('error');
+      if (token === operation.current) { setError('decode'); setStatus('error'); }
+    } finally {
+      if (context && context.state !== 'closed') void context.close();
     }
   };
 
@@ -377,6 +372,9 @@ export default function Home() {
   };
 
   const removeFile = () => {
+    operation.current += 1;
+    stopPlayback();
+    setError('');
     if (audioUrl) URL.revokeObjectURL(audioUrl);
     setFile(null);
     setAudioUrl('');
@@ -389,14 +387,19 @@ export default function Home() {
   };
 
   const transcribe = async () => {
-    if (!file || status === 'processing') return;
+    if (!file || busyRef.current || (status !== 'ready' && status !== 'done')) return;
+    const token = operation.current;
+    busyRef.current = true;
+    setEngineBusy(true);
     setStatus('processing');
     setError('');
     setProgress(.02);
 
+    let decodeContext: AudioContext | undefined;
     try {
-      const decodeContext = new AudioContext();
+      decodeContext = new AudioContext();
       const decoded = await decodeContext.decodeAudioData(await file.arrayBuffer());
+      if (token !== operation.current) return;
       const frameCount = Math.ceil(decoded.duration * 22050);
       const offline = new OfflineAudioContext(1, frameCount, 22050);
       const source = offline.createBufferSource();
@@ -419,6 +422,7 @@ export default function Home() {
       source.start();
       const resampled = await offline.startRendering();
       await decodeContext.close();
+      if (token !== operation.current) return;
 
       const samples = resampled.getChannelData(0);
       let peak = 0;
@@ -443,18 +447,21 @@ export default function Home() {
       const frames: number[][] = [];
       const onsets: number[][] = [];
       const contours: number[][] = [];
-      const engine = new BasicPitch('/model/model.json');
+      if (token !== operation.current) return;
+      const engine = engineRef.current ??= new BasicPitch('/model/model.json');
 
       await engine.evaluateModel(
         resampled,
         (nextFrames, nextOnsets, nextContours) => {
+          if (token !== operation.current) return;
           frames.push(...nextFrames);
           onsets.push(...nextOnsets);
           contours.push(...nextContours);
         },
-        (value) => setProgress(.1 + value * .82),
+        (value) => { if (token === operation.current) setProgress(.1 + value * .82); },
       );
 
+      if (token !== operation.current) return;
       const pitchRange = getPitchRange(TUNINGS[tuning].strings);
       const onsetThreshold = accuracy === 'detail' ? .3 : .42;
       const frameThreshold = accuracy === 'detail' ? .24 : .3;
@@ -486,7 +493,8 @@ export default function Home() {
       setView('tab');
       setStatus('done');
     } catch (reason) {
-      console.error(reason);
+      if (!(reason instanceof Error && reason.message === 'NO_NOTES')) engineRef.current = null;
+      if (token !== operation.current) return;
       setError(
         reason instanceof Error && reason.message === 'NO_NOTES'
           ? 'noNotes'
@@ -494,10 +502,17 @@ export default function Home() {
       );
       setStatus('error');
       setProgress(0);
+    } finally {
+      if (decodeContext && decodeContext.state !== 'closed') void decodeContext.close();
+      busyRef.current = false;
+      setEngineBusy(false);
     }
   };
 
   const openDemo = () => {
+    operation.current += 1;
+    stopPlayback();
+    setError('');
     setNotes(getDemo(tuning));
     setFile(null);
     setAudioUrl('');
@@ -510,10 +525,14 @@ export default function Home() {
   };
 
   const playSynthDemo = () => {
-    if (isPlaying) return;
+    if (isPlaying) { stopPlayback(); return; }
+    if (!displayNotes.length) return;
     const context = new AudioContext();
-    const startAt = context.currentTime + .05;
-    displayNotes.forEach((note) => {
+    const offset = currentTime >= effectiveDuration ? 0 : currentTime;
+    const synth = { context, frame: 0 };
+    synthRef.current = synth;
+    const startAt = context.currentTime + .05 - offset;
+    displayNotes.filter((note) => note.startTimeSeconds >= offset).forEach((note) => {
       const oscillator = context.createOscillator();
       const gain = context.createGain();
       oscillator.type = 'triangle';
@@ -528,16 +547,18 @@ export default function Home() {
     setIsPlaying(true);
     const started = performance.now();
     const tick = () => {
-      const elapsed = (performance.now() - started) / 1000;
+      if (synthRef.current !== synth) return;
+      const elapsed = offset + (performance.now() - started) / 1000;
       setCurrentTime(Math.min(elapsed, effectiveDuration));
-      if (elapsed < effectiveDuration) requestAnimationFrame(tick);
+      if (elapsed < effectiveDuration) synth.frame = requestAnimationFrame(tick);
       else {
         setIsPlaying(false);
         setCurrentTime(0);
+        synthRef.current = null;
         void context.close();
       }
     };
-    requestAnimationFrame(tick);
+    synth.frame = requestAnimationFrame(tick);
   };
 
   const togglePlayback = () => {
@@ -546,7 +567,7 @@ export default function Home() {
       playSynthDemo();
       return;
     }
-    if (audio.paused) void audio.play();
+    if (audio.paused) void audio.play().catch(() => { setIsPlaying(false); setError('decode'); });
     else audio.pause();
   };
 
@@ -574,7 +595,7 @@ export default function Home() {
 
   const activeProgress = Math.min(100, Math.round(progress * 100));
   const playPercent = Math.min(100, (currentTime / Math.max(effectiveDuration, 1)) * 100);
-  const visibleNotes = displayNotes.slice(0, 72);
+  const visibleNotes = displayNotes;
   const maxPitch = Math.max(...displayNotes.map((note) => note.pitchMidi), 69);
   const minPitch = Math.min(...displayNotes.map((note) => note.pitchMidi), 50);
 
@@ -653,13 +674,13 @@ export default function Home() {
           <div className="settings-row">
             <label>
               <span>{t.tuning}</span>
-              <select value={tuning} onChange={(event) => setTuning(event.target.value as TuningKey)}>
+              <select disabled={engineBusy} value={tuning} onChange={(event) => setTuning(event.target.value as TuningKey)}>
                 {Object.entries(TUNINGS).map(([key, value]) => <option key={key} value={key}>{value.name}</option>)}
               </select>
             </label>
             <label>
               <span>{t.accuracy}</span>
-              <select value={accuracy} onChange={(event) => setAccuracy(event.target.value as AccuracyProfile)}>
+              <select disabled={engineBusy} value={accuracy} onChange={(event) => setAccuracy(event.target.value as AccuracyProfile)}>
                 <option value="balanced">{t.balanced}</option>
                 <option value="detail">{t.detail}</option>
               </select>
@@ -685,7 +706,7 @@ export default function Home() {
           <button
             className="primary-button"
             type="button"
-            disabled={!file || status === 'processing' || status === 'error'}
+            disabled={!file || engineBusy || status === 'validating' || status === 'error'}
             onClick={() => void transcribe()}
           >
             <span>{status === 'processing' ? t.recognizing : status === 'done' && !isDemo ? t.recognizeAgain : t.recognize}</span>
@@ -698,7 +719,7 @@ export default function Home() {
           <div className="score-toolbar">
             <div>
               <span className={`live-dot ${status === 'processing' ? 'pulse' : ''}`} />
-              <span>{status === 'done' && !isDemo ? t.resultReady : status === 'processing' ? t.analyzing : t.demoTranscription}</span>
+              <span>{isDemo ? t.demoTranscription : status === 'done' ? t.resultReady : t.analyzing}</span>
             </div>
             <button type="button" onClick={openDemo}>{t.openDemo} <span>↗</span></button>
           </div>
@@ -754,7 +775,7 @@ export default function Home() {
             {view === 'score' && (
               <div className="staff-scroll">
                 <div className="staff-sheet" style={{ minWidth: `${Math.max(700, visibleNotes.length * 45)}px` }}>
-                  <span className="clef">𝄞</span>
+                  <span className="clef">↕</span>
                   {[0, 1, 2, 3, 4].map((line) => <i className="staff-line" style={{ top: 42 + line * 18 }} key={line} />)}
                   {visibleNotes.map((note, index) => {
                     const normalized = (note.pitchMidi - minPitch) / Math.max(1, maxPitch - minPitch);
@@ -812,12 +833,13 @@ export default function Home() {
             />
           )}
 
+          <p className="export-note">{language === 'KZ' ? 'MusicXML — 4/4, он алтылық нотаға дейін дөңгелектелген бастапқы нұсқа. Ырғақты мұғаліммен тексеріңіз. Дыбыс сызбасы ноталық партитура емес.' : 'MusicXML — черновик в 4/4 с округлением до шестнадцатых. Проверьте ритм с преподавателем. Контур высоты звука — не нотная партитура.'}</p>
           <div className="export-bar">
             <span>{t.export}</span>
             <div>
-              <button type="button" onClick={() => void exportMidi()}>MIDI ↓</button>
-              <button type="button" onClick={exportMusicXml}>MusicXML ↓</button>
-              <button type="button" onClick={() => window.print()}>{t.print} ↓</button>
+              <button type="button" disabled={!displayNotes.length} onClick={() => void exportMidi()}>MIDI ↓</button>
+              <button type="button" disabled={!displayNotes.length} onClick={exportMusicXml}>MusicXML ↓</button>
+              <button type="button" disabled={!displayNotes.length} onClick={() => window.print()}>{t.print} ↓</button>
             </div>
           </div>
         </article>
