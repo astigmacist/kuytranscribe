@@ -98,6 +98,7 @@ button, a, label { -webkit-tap-highlight-color: transparent; }
 .file-copy span { color: var(--muted); font-size: 9px; text-transform: uppercase; letter-spacing: .06em; }
 .selected-file > button { align-self: start; width: 28px; height: 28px; border: 1px solid var(--line); border-radius: 50%; background: transparent; color: var(--muted); cursor: pointer; font-size: 16px; line-height: 1; }
 .selected-file > button:hover { border-color: var(--wine); color: var(--wine); }
+.long-file-note { margin: -10px 0 18px; padding: 10px 12px; border-left: 2px solid var(--gold); background: rgba(176,128,57,.08); color: var(--muted); font-size: 10px; line-height: 1.5; }
 
 .primary-button:not(:disabled) { background: var(--wine); cursor: pointer; transition: .2s ease; }
 .primary-button:not(:disabled):hover { background: var(--wine-dark); transform: translateY(-1px); }

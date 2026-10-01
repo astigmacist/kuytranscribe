@@ -18,6 +18,14 @@ import {
   refineDombraNotes,
   retabDombraNotes,
 } from '@/lib/dombra-transcription';
+import {
+  ANALYSIS_SAMPLE_RATE,
+  AudioChunk,
+  MAX_AUDIO_DURATION_SECONDS,
+  MAX_AUDIO_FILE_BYTES,
+  placeChunkNotes,
+  planAudioChunks,
+} from '@/lib/audio-chunks';
 
 type Status = 'idle' | 'validating' | 'ready' | 'processing' | 'done' | 'error';
 type ViewMode = 'tab' | 'score' | 'notes';
@@ -68,7 +76,7 @@ const COPY = {
     deleteFile: 'Удалить файл',
     dragTitle: 'Перетащите аудиофайл сюда',
     chooseDevice: 'или выберите с устройства',
-    maxDuration: 'до 10 минут',
+    maxDuration: 'до 15 минут · до 300 МБ',
     tuning: 'Строй домбры',
     accuracy: 'Точность',
     balanced: 'Точная · меньше лишних нот',
@@ -78,6 +86,8 @@ const COPY = {
     detecting: 'Определяем высоту и начало нот…',
     cleaning: 'Убираем шум и ложные гармоники…',
     buildingTab: 'Собираем удобную табулатуру…',
+    chunkProgress: (current: number, total: number) => `Фрагмент ${current} из ${total}`,
+    longFileReady: 'Длинная запись будет обработана по частям. Не закрывайте вкладку во время распознавания.',
     recognize: 'Распознать күй',
     recognizing: 'Распознаём…',
     recognizeAgain: 'Распознать заново',
@@ -116,11 +126,11 @@ const COPY = {
     inBrowser: 'локально в браузере',
     errors: {
       fileType: 'Выберите аудиофайл MP3, WAV, M4A, OGG или FLAC.',
-      fileSize: 'Файл слишком большой. Максимальный размер — 120 МБ.',
-      fileDuration: 'Используйте запись длительностью до 10 минут.',
+      fileSize: 'Файл слишком большой. Максимальный размер — 300 МБ.',
+      fileDuration: 'Используйте запись длительностью до 15 минут.',
       decode: 'Не удалось прочитать запись. Попробуйте WAV или MP3.',
       noNotes: 'Ноты не найдены. Попробуйте более громкую сольную запись домбры.',
-      transcription: 'Распознавание не завершилось. Попробуйте короткий WAV/MP3 без фоновой музыки.',
+      transcription: 'Распознавание не завершилось. Попробуйте MP3/WAV с чистой сольной записью без фоновой музыки.',
     },
   },
   KZ: {
@@ -140,7 +150,7 @@ const COPY = {
     deleteFile: 'Файлды жою',
     dragTitle: 'Аудиофайлды осында сүйреп әкеліңіз',
     chooseDevice: 'немесе құрылғыдан таңдаңыз',
-    maxDuration: '10 минутқа дейін',
+    maxDuration: '15 минутқа дейін · 300 МБ дейін',
     tuning: 'Домбыра бұрауы',
     accuracy: 'Дәлдік',
     balanced: 'Дәл · артық ноталар аз',
@@ -150,6 +160,8 @@ const COPY = {
     detecting: 'Ноталардың биіктігі мен басталуын анықтап жатырмыз…',
     cleaning: 'Шу мен жалған гармоникаларды тазалап жатырмыз…',
     buildingTab: 'Ыңғайлы табулатураны құрастырып жатырмыз…',
+    chunkProgress: (current: number, total: number) => `${current}/${total} фрагмент`,
+    longFileReady: 'Ұзақ жазба бөліктермен өңделеді. Тану кезінде браузер бетін жаппаңыз.',
     recognize: 'Күйді тану',
     recognizing: 'Танып жатырмыз…',
     recognizeAgain: 'Қайта тану',
@@ -188,11 +200,11 @@ const COPY = {
     inBrowser: 'браузерде жергілікті',
     errors: {
       fileType: 'MP3, WAV, M4A, OGG немесе FLAC аудиофайлын таңдаңыз.',
-      fileSize: 'Файл тым үлкен. Ең үлкен өлшемі — 120 МБ.',
-      fileDuration: 'Ұзақтығы 10 минутқа дейінгі жазбаны пайдаланыңыз.',
+      fileSize: 'Файл тым үлкен. Ең үлкен өлшемі — 300 МБ.',
+      fileDuration: 'Ұзақтығы 15 минутқа дейінгі жазбаны пайдаланыңыз.',
       decode: 'Жазбаны оқу мүмкін болмады. WAV немесе MP3 файлын қолданып көріңіз.',
       noNotes: 'Ноталар табылмады. Домбыраның қаттырақ әрі таза жеке жазбасын қолданып көріңіз.',
-      transcription: 'Тану аяқталмады. Фондық музыкасыз қысқа WAV/MP3 файлын қолданып көріңіз.',
+      transcription: 'Тану аяқталмады. Фондық музыкасыз таза жеке MP3/WAV жазбасын қолданып көріңіз.',
     },
   },
 } as const;
@@ -236,6 +248,74 @@ function cleanTitle(filename: string) {
   return filename.replace(/\.[^/.]+$/, '').replace(/[_-]+/g, ' ');
 }
 
+function readAudioDuration(url: string) {
+  return new Promise<number>((resolve, reject) => {
+    const probe = document.createElement('audio');
+    const timeout = window.setTimeout(() => finish(new Error('Audio metadata timeout')), 20000);
+
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      probe.onloadedmetadata = null;
+      probe.onerror = null;
+      probe.removeAttribute('src');
+      probe.load();
+    };
+    const finish = (result: number | Error) => {
+      cleanup();
+      if (result instanceof Error) reject(result);
+      else resolve(result);
+    };
+
+    probe.preload = 'metadata';
+    probe.onloadedmetadata = () => {
+      const measured = probe.duration;
+      if (Number.isFinite(measured) && measured > 0) finish(measured);
+      else finish(new Error('Invalid audio duration'));
+    };
+    probe.onerror = () => finish(new Error('Audio metadata unavailable'));
+    probe.src = url;
+  });
+}
+
+async function renderAnalysisChunk(decoded: AudioBuffer, chunk: AudioChunk) {
+  const frameCount = Math.max(1, Math.ceil(chunk.durationSeconds * ANALYSIS_SAMPLE_RATE));
+  const offline = new OfflineAudioContext(1, frameCount, ANALYSIS_SAMPLE_RATE);
+  const source = offline.createBufferSource();
+  const highPass = offline.createBiquadFilter();
+  const lowPass = offline.createBiquadFilter();
+  const compressor = offline.createDynamicsCompressor();
+
+  source.buffer = decoded;
+  highPass.type = 'highpass';
+  highPass.frequency.value = 70;
+  highPass.Q.value = .7;
+  lowPass.type = 'lowpass';
+  lowPass.frequency.value = 4800;
+  lowPass.Q.value = .7;
+  compressor.threshold.value = -34;
+  compressor.knee.value = 18;
+  compressor.ratio.value = 3;
+  compressor.attack.value = .004;
+  compressor.release.value = .2;
+  source.connect(highPass).connect(lowPass).connect(compressor).connect(offline.destination);
+  source.start(0, chunk.startTimeSeconds, chunk.durationSeconds);
+
+  const rendered = await offline.startRendering();
+  const samples = rendered.getChannelData(0);
+  let peak = 0;
+  for (let index = 0; index < samples.length; index += 1) {
+    peak = Math.max(peak, Math.abs(samples[index]));
+  }
+  if (peak > 0 && peak < .78) {
+    const gain = Math.min(3.5, .86 / peak);
+    for (let index = 0; index < samples.length; index += 1) {
+      samples[index] = Math.max(-1, Math.min(1, samples[index] * gain));
+    }
+  }
+
+  return rendered;
+}
+
 function estimateTempo(notes: DombraNote[]) {
   const intervals = notes
     .slice(1)
@@ -273,6 +353,7 @@ export default function Home() {
   const [accuracy, setAccuracy] = useState<AccuracyProfile>('balanced');
   const [view, setView] = useState<ViewMode>('tab');
   const [error, setError] = useState<ErrorKey | ''>('');
+  const [chunkStatus, setChunkStatus] = useState({ current: 0, total: 0 });
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [isDemo, setIsDemo] = useState(true);
@@ -328,7 +409,7 @@ export default function Home() {
       setStatus('error');
       return;
     }
-    if (selected.size > 120 * 1024 * 1024) {
+    if (selected.size > MAX_AUDIO_FILE_BYTES) {
       setError('fileSize');
       setStatus('error');
       return;
@@ -339,24 +420,24 @@ export default function Home() {
     setAudioUrl(nextUrl);
     setNotes([]);
     setProgress(0);
+    setChunkStatus({ current: 0, total: 0 });
     setCurrentTime(0);
     setIsDemo(false);
     setError('');
     setStatus('validating');
     setDuration(0);
 
-    let context: AudioContext | undefined;
     try {
-      context = new AudioContext();
-      const decoded = await context.decodeAudioData(await selected.arrayBuffer());
-      if (token !== operation.current) return;
-      setDuration(decoded.duration);
-      if (decoded.duration > 600) { setError('fileDuration'); setStatus('error'); }
+      const measuredDuration = await readAudioDuration(nextUrl);
+      if (token !== operation.current) {
+        URL.revokeObjectURL(nextUrl);
+        return;
+      }
+      setDuration(measuredDuration);
+      if (measuredDuration > MAX_AUDIO_DURATION_SECONDS) { setError('fileDuration'); setStatus('error'); }
       else setStatus('ready');
     } catch {
       if (token === operation.current) { setError('decode'); setStatus('error'); }
-    } finally {
-      if (context && context.state !== 'closed') void context.close();
     }
   };
 
@@ -382,6 +463,7 @@ export default function Home() {
     setNotes([]);
     setStatus('idle');
     setProgress(0);
+    setChunkStatus({ current: 0, total: 0 });
     setCurrentTime(0);
     setIsDemo(true);
   };
@@ -400,42 +482,13 @@ export default function Home() {
       decodeContext = new AudioContext();
       const decoded = await decodeContext.decodeAudioData(await file.arrayBuffer());
       if (token !== operation.current) return;
-      const frameCount = Math.ceil(decoded.duration * 22050);
-      const offline = new OfflineAudioContext(1, frameCount, 22050);
-      const source = offline.createBufferSource();
-      const highPass = offline.createBiquadFilter();
-      const lowPass = offline.createBiquadFilter();
-      const compressor = offline.createDynamicsCompressor();
-      source.buffer = decoded;
-      highPass.type = 'highpass';
-      highPass.frequency.value = 70;
-      highPass.Q.value = .7;
-      lowPass.type = 'lowpass';
-      lowPass.frequency.value = 4800;
-      lowPass.Q.value = .7;
-      compressor.threshold.value = -34;
-      compressor.knee.value = 18;
-      compressor.ratio.value = 3;
-      compressor.attack.value = .004;
-      compressor.release.value = .2;
-      source.connect(highPass).connect(lowPass).connect(compressor).connect(offline.destination);
-      source.start();
-      const resampled = await offline.startRendering();
       await decodeContext.close();
+      decodeContext = undefined;
       if (token !== operation.current) return;
-
-      const samples = resampled.getChannelData(0);
-      let peak = 0;
-      for (let index = 0; index < samples.length; index += 1) {
-        peak = Math.max(peak, Math.abs(samples[index]));
-      }
-      if (peak > 0 && peak < .78) {
-        const gain = Math.min(3.5, .86 / peak);
-        for (let index = 0; index < samples.length; index += 1) {
-          samples[index] = Math.max(-1, Math.min(1, samples[index] * gain));
-        }
-      }
-      setProgress(.09);
+      const chunks = planAudioChunks(decoded.duration);
+      if (!chunks.length) throw new Error('INVALID_AUDIO');
+      setChunkStatus({ current: 1, total: chunks.length });
+      setProgress(.05);
 
       const {
         BasicPitch,
@@ -443,46 +496,71 @@ export default function Home() {
         noteFramesToTime,
         outputToNotesPoly,
       } = await import('@spotify/basic-pitch');
+      const tf = await import('@tensorflow/tfjs');
 
-      const frames: number[][] = [];
-      const onsets: number[][] = [];
-      const contours: number[][] = [];
       if (token !== operation.current) return;
       const engine = engineRef.current ??= new BasicPitch('/model/model.json');
-
-      await engine.evaluateModel(
-        resampled,
-        (nextFrames, nextOnsets, nextContours) => {
-          if (token !== operation.current) return;
-          frames.push(...nextFrames);
-          onsets.push(...nextOnsets);
-          contours.push(...nextContours);
-        },
-        (value) => { if (token === operation.current) setProgress(.1 + value * .82); },
-      );
-
-      if (token !== operation.current) return;
+      await engine.model;
       const pitchRange = getPitchRange(TUNINGS[tuning].strings);
       const onsetThreshold = accuracy === 'detail' ? .3 : .42;
       const frameThreshold = accuracy === 'detail' ? .24 : .3;
       const minimumFrames = accuracy === 'detail' ? 5 : 7;
-      const raw = noteFramesToTime(
-        addPitchBendsToNoteEvents(
-          contours,
-          outputToNotesPoly(
-            frames,
-            onsets,
-            onsetThreshold,
-            frameThreshold,
-            minimumFrames,
-            true,
-            pitchRange.maximumHz,
-            pitchRange.minimumHz,
-            true,
-            accuracy === 'detail' ? 11 : 8,
+      const raw: RawNote[] = [];
+
+      for (const chunk of chunks) {
+        if (token !== operation.current) return;
+        setChunkStatus({ current: chunk.index + 1, total: chunks.length });
+
+        const resampled = await renderAnalysisChunk(decoded, chunk);
+        if (token !== operation.current) return;
+        const frames: number[][] = [];
+        const onsets: number[][] = [];
+        const contours: number[][] = [];
+
+        const tensorEngine = tf.engine();
+        tensorEngine.startScope();
+        try {
+          await engine.evaluateModel(
+            resampled,
+            (nextFrames, nextOnsets, nextContours) => {
+              if (token !== operation.current) return;
+              frames.push(...nextFrames);
+              onsets.push(...nextOnsets);
+              contours.push(...nextContours);
+            },
+            (value) => {
+              if (token !== operation.current) return;
+              const completed = chunk.index + value;
+              setProgress(.05 + (completed / chunks.length) * .87);
+            },
+          );
+        } finally {
+          tensorEngine.endScope();
+        }
+
+        if (token !== operation.current) return;
+        const localNotes = noteFramesToTime(
+          addPitchBendsToNoteEvents(
+            contours,
+            outputToNotesPoly(
+              frames,
+              onsets,
+              onsetThreshold,
+              frameThreshold,
+              minimumFrames,
+              true,
+              pitchRange.maximumHz,
+              pitchRange.minimumHz,
+              true,
+              accuracy === 'detail' ? 11 : 8,
+            ),
           ),
-        ),
-      );
+        );
+        raw.push(...placeChunkNotes(localNotes, chunk));
+        setProgress(.05 + ((chunk.index + 1) / chunks.length) * .87);
+        await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
+      }
+
       setProgress(.95);
 
       const refined = refineDombraNotes(raw, TUNINGS[tuning].strings, accuracy);
@@ -490,6 +568,7 @@ export default function Home() {
       if (!refined.length) throw new Error('NO_NOTES');
       setNotes(refined);
       setProgress(1);
+      setChunkStatus({ current: 0, total: 0 });
       setView('tab');
       setStatus('done');
     } catch (reason) {
@@ -502,6 +581,7 @@ export default function Home() {
       );
       setStatus('error');
       setProgress(0);
+      setChunkStatus({ current: 0, total: 0 });
     } finally {
       if (decodeContext && decodeContext.state !== 'closed') void decodeContext.close();
       busyRef.current = false;
@@ -519,6 +599,7 @@ export default function Home() {
     setDuration(13.86);
     setStatus('done');
     setProgress(1);
+    setChunkStatus({ current: 0, total: 0 });
     setIsDemo(true);
     setView('tab');
     setCurrentTime(0);
@@ -643,15 +724,18 @@ export default function Home() {
           </div>
 
           {file ? (
-            <div className="selected-file">
-              <div className="file-vinyl"><span>♪</span></div>
-              <div className="file-copy">
-                <small>{t.audioReady}</small>
-                <strong>{file.name}</strong>
-                <span>{(file.size / 1024 / 1024).toFixed(1)} МБ · {formatTime(duration)}</span>
+            <>
+              <div className="selected-file">
+                <div className="file-vinyl"><span>♪</span></div>
+                <div className="file-copy">
+                  <small>{t.audioReady}</small>
+                  <strong>{file.name}</strong>
+                  <span>{(file.size / 1024 / 1024).toFixed(1)} МБ · {formatTime(duration)}</span>
+                </div>
+                <button type="button" onClick={removeFile} aria-label={t.deleteFile}>×</button>
               </div>
-              <button type="button" onClick={removeFile} aria-label={t.deleteFile}>×</button>
-            </div>
+              {duration >= 180 && status !== 'error' && <p className="long-file-note">◷ {t.longFileReady}</p>}
+            </>
           ) : (
             <label
               className="dropzone"
@@ -694,7 +778,7 @@ export default function Home() {
               <small>{activeProgress < 12
                 ? t.preparing
                 : activeProgress < 93
-                  ? t.detecting
+                  ? `${chunkStatus.total > 1 ? `${t.chunkProgress(chunkStatus.current, chunkStatus.total)} · ` : ''}${t.detecting}`
                   : activeProgress < 97
                     ? t.cleaning
                     : t.buildingTab}</small>
